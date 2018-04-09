@@ -108,15 +108,12 @@ except ImportError:
 from luigi.contrib import slurm_runner
 
 POLL_TIME = 15  # decided to hard-code rather than configure here
-MEM_RETRY_MAX_RETRIES = 10 # some hard limit to the maximum number of memory-related error retries
+MEM_RETRY_MAX_RETRIES = 4 # some hard limit to the maximum number of memory-related error retries
 MEM_RETRY_MAX_MEM = 128000 # hard memory limit per task on retry
 
 class slurm(luigi.Config):
     ntasks = luigi.IntParameter(default=1, significant=False)
     mem = luigi.IntParameter(default=4000, significant=False)
-    mem_retries = luigi.IntParameter(default=3, significant=False,
-        description="retries n times, doubling the memory each run if a task "
-        "fails on an out of memory error")
     gres = luigi.Parameter(default='', significant=False)
     partition = luigi.Parameter(default='', significant=False)
     time = luigi.Parameter(default='', significant=False)
@@ -267,11 +264,8 @@ class SlurmTask(luigi.Task):
         if not hasattr(self, 'mem') or self.mem is None:
             self.mem = self.slurm_config.mem
 
-        if not hasattr(self, 'mem_retries') or self.mem_retries is None:
-            self.mem_retries = self.slurm_config.mem_retries
-
-        if not hasattr(self, '_mem_retry') or self._mem_retry is None:
-            self._mem_retry = 0
+        if not hasattr(self, '_retry_count') or self._retry_count is None:
+            self._retry_count = MEM_RETRY_MAX_RETRIES
 
 
     def __str__(self):
@@ -320,6 +314,17 @@ class SlurmTask(luigi.Task):
     def dont_remove_tmp_dir(self):
         return self.slurm_config.dont_remove_tmp_dir
 
+    @property
+    def current_retry(self):
+        _current_retry = 1
+        if hasattr(self, 'retry') and self.retry is not None and self.retry > 0:
+            _current_retry = self.retry
+        return _current_retry
+
+    @property
+    def total_mem(self):
+        return self.mem * self.current_retry
+
     def _fetch_task_failures(self):
         if not os.path.exists(self.errfile):
             logger.info('No error file')
@@ -366,28 +371,18 @@ class SlurmTask(luigi.Task):
             else:
                 pickle.dump(self, open(self.job_file, "wb"))
 
+    @property
+    def retry_count(self):
+        return self._retry_count
+
     def run(self):
         self.init_vars()
         if self.run_locally:
             self.work()
         else:
             self._init_local()
-            # retry on memory errors only, avoiding a while(1){} loop in favor of a hard limit
-            for i in range(0, MEM_RETRY_MAX_RETRIES):
-                try:
-                    self._run_job()
-                except OutOfMemoryError as e:
-                    # give up after configured number of retries
-                    if self._mem_retry > self.mem_retries:
-                        raise e
-                    # double memory allocation, up to some hard limit
-                    self.mem = self.mem * 2
-                    if self.mem > MEM_RETRY_MAX_MEM:
-                        raise e
-                    # bump the retry count
-                    self._mem_retry += 1
-                # done running the job
-                break
+            # let the scheduler retry on memory errors, up to some hard memory limit
+            self._run_job()
             # The procedure:
             # - Pickle the run method
             # - Construct a sbatch argument that runs a generic runner function with the path to the run method
@@ -419,9 +414,9 @@ class SlurmTask(luigi.Task):
         # Build sbatch file and submit command
         self.outfile = os.path.join(self.tmp_dir, 'job.out')
         self.errfile = os.path.join(self.tmp_dir, 'job.err')
-        sbatchfile = os.path.join(self.tmp_dir, '{}.sbatch'.format(self.task_family))
+        sbatchfile = os.path.join(self.tmp_dir, '{}-{}-{}.sbatch'.format(self.task_family, self.current_retry, self.total_mem))
         submit_cmd = _build_submit_command(job_str, self.task_family, self.outfile,
-                                           self.errfile, self.ntasks, self.mem,
+                                           self.errfile, self.ntasks, self.total_mem,
                                            self.gres, self.partition, self.time, sbatchfile)
         logger.debug('sbatch command: {}'.format(submit_cmd))
 
