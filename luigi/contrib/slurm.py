@@ -108,15 +108,12 @@ except ImportError:
 from luigi.contrib import slurm_runner
 
 POLL_TIME = 15  # decided to hard-code rather than configure here
-MEM_RETRY_MAX_RETRIES = 4 # some hard limit to the maximum number of memory-related error retries
-MEM_RETRY_MAX_MEM = 128000 # hard memory limit per task on retry
 
 class slurm(luigi.Config):
-    ntasks = luigi.IntParameter(default=1, significant=False)
+    ntasks = luigi.IntParameter(default=2, significant=False)
     mem = luigi.IntParameter(default=4000, significant=False)
     gres = luigi.Parameter(default='', significant=False)
     partition = luigi.Parameter(default='', significant=False)
-    time = luigi.Parameter(default='', significant=False)
     shared_tmp_dir = luigi.Parameter(default='/home', significant=False)
     work_dir = luigi.Parameter(default='', significant=False,
         description="Location of our environment, must be a directory "
@@ -264,10 +261,6 @@ class SlurmTask(luigi.Task):
         if not hasattr(self, 'mem') or self.mem is None:
             self.mem = self.slurm_config.mem
 
-        if not hasattr(self, '_retry_count') or self._retry_count is None:
-            self._retry_count = MEM_RETRY_MAX_RETRIES
-
-
     def __str__(self):
         return '\n'.join([
             pprint.pformat(vars(self.slurm_config), indent=2),
@@ -285,10 +278,6 @@ class SlurmTask(luigi.Task):
     @property
     def partition(self):
         return self.slurm_config.partition
-
-    @property
-    def time(self):
-        return self.slurm_config.time
 
     @property
     def shared_tmp_dir(self):
@@ -313,17 +302,6 @@ class SlurmTask(luigi.Task):
     @property
     def dont_remove_tmp_dir(self):
         return self.slurm_config.dont_remove_tmp_dir
-
-    @property
-    def current_retry(self):
-        _current_retry = 1
-        if hasattr(self, 'retry') and self.retry is not None and self.retry > 0:
-            _current_retry = self.retry
-        return _current_retry
-
-    @property
-    def total_mem(self):
-        return self.mem * self.current_retry
 
     def _fetch_task_failures(self):
         if not os.path.exists(self.errfile):
@@ -371,10 +349,6 @@ class SlurmTask(luigi.Task):
             else:
                 pickle.dump(self, open(self.job_file, "wb"))
 
-    @property
-    def retry_count(self):
-        return self._retry_count
-
     def run(self):
         self.init_vars()
         if self.run_locally:
@@ -414,9 +388,9 @@ class SlurmTask(luigi.Task):
         # Build sbatch file and submit command
         self.outfile = os.path.join(self.tmp_dir, 'job.out')
         self.errfile = os.path.join(self.tmp_dir, 'job.err')
-        sbatchfile = os.path.join(self.tmp_dir, '{}-{}-{}.sbatch'.format(self.task_family, self.current_retry, self.total_mem))
+        sbatchfile = os.path.join(self.tmp_dir, '{}.sbatch'.format(self.task_family))
         submit_cmd = _build_submit_command(job_str, self.task_family, self.outfile,
-                                           self.errfile, self.ntasks, self.total_mem,
+                                           self.errfile, self.ntasks, self.mem,
                                            self.gres, self.partition, self.time, sbatchfile)
         logger.debug('sbatch command: {}'.format(submit_cmd))
 
@@ -471,10 +445,15 @@ class SlurmTask(luigi.Task):
                     for error in errors:
                         logger.error(error)
                 break
+            elif job_status == 'TIMEOUT':
+                logger.error('Job ran out of time')
+                raise TimeoutError(
+                    '\n'.join(self._fetch_task_out()),
+                    '\n'.join(self._fetch_task_failures())
+                )
             elif job_status == 'OUT_OF_MEMORY':
-                logger.error('Job ran OUT_OF_MEMORY')
+                logger.error('Job ran out of memory')
                 raise OutOfMemoryError(
-                    "job status isn't one of ['RUNNING', 'PENDING', 'COMPLETED', 'FAILED', 'CANCELLED', 'u']: {}".format(job_status),
                     '\n'.join(self._fetch_task_out()),
                     '\n'.join(self._fetch_task_failures())
                 )
@@ -483,7 +462,7 @@ class SlurmTask(luigi.Task):
                 logger.info('Job status is UNKNOWN!')
                 logger.info('Status is : {}'.format(job_status))
                 raise SlurmError(
-                    "job status isn't one of ['RUNNING', 'PENDING', 'COMPLETED', 'FAILED', 'CANCELLED', 'u']: {}".format(job_status),
+                    "job status isn't one of ['RUNNING', 'PENDING', 'COMPLETED', 'FAILED', 'CANCELLED', 'TIMEOUT', 'OUT_OF_MEMORY']: {}".format(job_status),
                     '\n'.join(self._fetch_task_out()),
                     '\n'.join(self._fetch_task_failures())
                 )
@@ -521,3 +500,5 @@ class SlurmError(RuntimeError):
         return info
 
 class OutOfMemoryError(SlurmError): pass
+
+class TimeoutError(SlurmError): pass
