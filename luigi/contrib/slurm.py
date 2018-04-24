@@ -113,7 +113,8 @@ class slurm(luigi.Config):
     ntasks = luigi.IntParameter(default=2, significant=False)
     mem = luigi.IntParameter(default=4000, significant=False)
     gres = luigi.Parameter(default='', significant=False)
-    partition = luigi.Parameter(default='', significant=False)
+    partitions = luigi.ListParameter(default=[], description='randomly assign to one of the given partitions')
+    time = luigi.Parameter(default='', significant=False)
     shared_tmp_dir = luigi.Parameter(default='/home', significant=False)
     work_dir = luigi.Parameter(default='', significant=False,
         description="Location of our environment, must be a directory "
@@ -227,7 +228,7 @@ class SlurmTask(luigi.Task):
     - mem: The amount of memory to allocate for the Task.
     - gres: The gres resources to allocate for the Task.
     - time: The time to allocate for the Task.
-    - partition: The partition allocate for the Task.
+    - partitions: The partitions on which Tasks will be (randomly) allocated.
     - shared_tmp_dir: Shared drive accessible from all nodes in the cluster.
           Run method is pickled to a temporary folder in this path.
     - job_name_format: String that can be passed in to customize the job name
@@ -282,6 +283,9 @@ class SlurmTask(luigi.Task):
         if not hasattr(self, 'mem') or self.mem is None:
             self.mem = self.slurm_config.mem
 
+        if (not hasattr(self, 'partitions') or len(self.partitions) < 1) and len(self.slurm_config.partitions) > 0:
+            self.partitions = self.slurm_config.partitions
+
     def __str__(self):
         return '\n'.join([
             pprint.pformat(vars(self.slurm_config), indent=2),
@@ -297,8 +301,8 @@ class SlurmTask(luigi.Task):
         return self.slurm_config.gres
 
     @property
-    def partition(self):
-        return self.slurm_config.partition
+    def time(self):
+        return self.slurm_config.time
 
     @property
     def shared_tmp_dir(self):
@@ -410,6 +414,12 @@ class SlurmTask(luigi.Task):
         self.outfile = os.path.join(self.tmp_dir, 'job.out')
         self.errfile = os.path.join(self.tmp_dir, 'job.err')
         sbatchfile = os.path.join(self.tmp_dir, '{}.sbatch'.format(self.task_family))
+
+        # parition allocation, random for now
+        if len(self.partitions) > 0:
+            i = random.randrange(len(self.partitions))
+            self.partition = self.partitions[i]
+
         submit_cmd = _build_submit_command(job_str, self.task_family, self.outfile,
                                            self.errfile, self.ntasks, self.mem,
                                            self.gres, self.partition, self.time, sbatchfile)
