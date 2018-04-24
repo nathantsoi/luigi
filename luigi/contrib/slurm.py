@@ -245,6 +245,27 @@ class SlurmTask(luigi.Task):
         significant=False, default='',
         description="Explicit job name given via sbatch.")
 
+    def _setup_logging(self):
+        global logger
+        name = 'luigi-interface'
+        logfile = "{}.log".format(self.output().path)
+        logpath = os.path.dirname(logfile)
+        if not os.path.exists(logpath):
+            try:
+                os.makedirs(logpath)
+            except FileExistsError:
+                pass
+        logger.debug("adding handler to logfile: %s", logfile)
+        handler = logging.FileHandler(logfile)
+        formatter = logging.Formatter("{}: %(asctime)s %(levelname)s %(message)s".format(self.__class__.__name__))
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
+        logger.setLevel(logging.DEBUG)
+        # prevent duplicates, TODO, track:
+        #loggers.update(dict(name, logger))
+        # task-local access to the configured logger
+        self.task_log = logger
+
     def __init__(self, *args, **kwargs):
         super(SlurmTask, self).__init__(*args, **kwargs)
         if self.job_name != '':

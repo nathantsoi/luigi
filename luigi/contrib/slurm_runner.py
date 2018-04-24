@@ -37,15 +37,32 @@ return from SlurmJobTask.run()
 
 import argparse
 import os
+import signal
 import sys
+import tracemalloc
 try:
     import cPickle as pickle
 except ImportError:
     import pickle
 import logging
 
+# handle out of memory errors by inspecting the heap and dumping the analysis to a file
+tracemallocfile = None
+tracemalloc.start(25)
+def sigterm_handler(signal, frame):
+    snapshot = tracemalloc.take_snapshot()
+    top_stats = snapshot.statistics('lineno')
+    if tracemallocfile:
+        with open(tracemallocfile, 'w+') as f:
+            f.write("SIGTERM tracemalloc before shutdown [ Top 10 ]\n")
+            for stat in top_stats[:10]:
+                f.write("{}\n".format(stat))
+        sys.exit(0)
+signal.signal(signal.SIGTERM, sigterm_handler)
+
 
 def main(args=sys.argv):
+    global tracemallocfile
     """Run the work() method from the class instance in the file "job-instance.pickle".
     """
     try:
@@ -56,9 +73,12 @@ def main(args=sys.argv):
         args = parser.parse_args()
 
         sys.path.append(os.getcwd())
+        tracemallocfile = os.path.join(args.tmp_dir, 'job.tracemalloc')
         job = None
         with open(os.path.join(args.tmp_dir, 'job.pickle'), 'rb') as f:
             job = pickle.load(f)
+        # Configure the logger
+        job._setup_logging()
         # Do the work contained
         job.work()
 
